@@ -9,12 +9,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
+import trimesh
 
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
 
-from load_llff import load_llff_data, load_colmap_depth
+from load_llff import load_llff_data, load_colmap_depth, load_realsense_data, load_realsense_depth
 from load_dtu import load_dtu_data
 
 from loss import SigmaLoss
@@ -28,6 +29,25 @@ import cv2
 # import time
 
 # concate_time, iter_time, split_time, loss_time, backward_time = [], [], [], [], []
+
+def real_camera_cfgs(height=720, width=1280, fov=60):
+    """
+    Returns a set of camera config parameters
+
+    Returns:
+    YACS CfgNode: Cam config params
+    """
+    _C = CN()
+    _C.ZNEAR = 0.01
+    _C.ZFAR = 10
+    _C.WIDTH = width
+    _C.HEIGHT = height
+    _C.FOV = 60
+    _ROOT_C = CN()
+    _ROOT_C.CAM = CN()
+    _ROOT_C.CAM.SIM = _C
+    _ROOT_C.CAM.REAL = _C
+    return _ROOT_C.clone()
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -628,7 +648,6 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
 
-
     if args.dataset_type == 'llff':
         if args.colmap_depth:
             depth_gts = load_colmap_depth(args.datadir, factor=args.factor, bd_factor=.75)
@@ -637,6 +656,21 @@ def train():
                                                                   spherify=args.spherify)
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
+
+        taxes = []
+        taxes_render = []
+        for i in range(images.shape[0]):
+            axis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+            taxes.append(axis)
+
+            # raxis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+            # taxes_render.append(axis)
+        scene = trimesh.Scene()
+        scene.add_geometry(taxes)
+        scene.show()
+
+        from IPython import embed; embed()
+
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         if not isinstance(i_test, list):
             i_test = [i_test]
@@ -668,6 +702,9 @@ def train():
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
+
+        print('here in load_llff')
+        from IPython import embed; embed()
     elif args.dataset_type == 'dtu':
         images, poses, hwf = load_dtu_data(args.datadir)
         print('Loaded DTU', images.shape, poses.shape, hwf, args.datadir)
@@ -689,6 +726,96 @@ def train():
         far = 5.0
         if args.colmap_depth:
             depth_gts = load_colmap_depth(args.datadir, factor=args.factor, bd_factor=.75)
+    elif args.dataset_type == 'realsense':
+        images, poses, hwf, render_poses = load_realsense_data(args.datadir)
+        # print('here after loading images, poses, hwf, render poses')
+        # from IPython import embed; embed()
+        # import trimesh
+
+        # trimesh for debugging camera poses
+        taxes = []
+        taxes_render = []
+        for i in range(images.shape[0]):
+            axis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+            taxes.append(axis)
+
+            # raxis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+            # taxes_render.append(axis)
+        scene = trimesh.Scene()
+        scene.add_geometry(taxes)
+        scene.show()
+
+        depth_gts = load_realsense_depth(args.datadir)
+        print('Loaded realsense data', images.shape, poses.shape, hwf, args.datadir)
+
+        # trimesh for debugging depth data
+        from IPython import embed; embed()
+        # TODO convert the depth values into 3D points in the camera frame / world frame
+
+        # real_cams = []
+        # for i in range(images.shape[0]):
+        #     real_cam_cfg = real_camera_cfgs(width=hwf[1], height=hwf[0])
+        #     real_cam = RGBDCamera(real_cam_cfg)
+        #     # real_cam.depth_scale = 0.001
+        #     depth_scale_true = 0.001
+        #     real_cam.depth_scale = 1
+        #     # real_cam.cam_int_mat = rs_int_mat
+        #     real_cam.img_height = real_cam_cfg.CAM.SIM.HEIGHT
+        #     real_cam.img_width = real_cam_cfg.CAM.SIM.WIDTH
+        #     real_cam.depth_min = real_cam_cfg.CAM.SIM.ZNEAR
+        #     real_cam.depth_max = real_cam_cfg.CAM.SIM.ZFAR
+
+        #     real_cams.append(real_cam)
+
+        # pcd_world_full = []
+        # pcd_dict_list = []
+        # # rebuild the point cloud using the depth image and camera pose
+        # for i, real_cam in enumerate(real_cams):
+        #     
+        #     cam_pose_mat = np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0)
+        #     cam_int_mat = cam_intrinsics[i]
+        #     real_cam.set_cam_ext(cam_ext=cam_pose_mat)
+        #     real_cam.cam_int_mat = cam_int_mat
+        #     real_cam._init_pers_mat()
+
+        #     # get point cloud in the world frame from this view
+        #     depth_img = grasp_data['depth'][i].astype(np.uint16)
+        #     depth_img = depth_img * depth_scale_true
+        #     valid = depth_img < real_cam.depth_max
+        #     valid = np.logical_and(valid, depth_img > real_cam.depth_min)
+        #     depth_img_valid = copy.deepcopy(depth_img)
+        #     depth_img_valid[np.logical_not(valid)] = 0.0 # not exactly sure what to put for invalid depth
+
+        #     pcd_cam = real_cam.get_pcd(in_world=False, filter_depth=False, rgb_image=rgb_img, depth_image=depth_img_valid)[0]
+        #     pcd_cam_img = pcd_cam.reshape(depth_img.shape[0], depth_img.shape[1], 3)
+        #     pcd_world = util.transform_pcd(pcd_cam, cam_pose_mat)
+        #     # pcd_world = copy.deepcopy(pcd_cam)
+        #     pcd_dict = {
+        #         'world': pcd_world,
+        #         'cam': pcd_cam,
+        #         'cam_img': pcd_cam,
+        #         'cam_pose_mat': cam_pose_mat
+        #     }
+        #     pcd_dict_list.append(pcd_dict)
+        #     pcd_world_full.append(pcd_world)
+
+        if args.test_scene is not None:
+            i_test = np.array([i for i in args.test_scene])
+
+        if i_test[0] < 0:
+            i_test = []
+
+        i_val = i_test
+        if args.train_scene is None:
+            i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                        (i not in i_test and i not in i_val)])
+        else:
+            i_train = np.array([i for i in args.train_scene if
+                        (i not in i_test and i not in i_val)])
+        
+        near = 0.0
+        far = 0.75
+
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
@@ -792,7 +919,9 @@ def train():
     if use_batching:
         # For random ray batching
         print('get rays')
+        # ray_sample = get_rays_np(H, W, focal, poses[0][:3, :4])
         rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+        # from IPython import embed; embed()
         if args.debug:
             print('rays.shape:', rays.shape)
         print('done, concats')
@@ -812,6 +941,15 @@ def train():
             rays_depth_list = []
             for i in i_train:
                 rays_depth = np.stack(get_rays_by_coord_np(H, W, focal, poses[i,:3,:4], depth_gts[i]['coord']), axis=0) # 2 x N x 3
+
+                # from ndf_robot.utils import trimesh_util
+                # ray_sample = get_rays_by_coord_np(H, W, focal, poses[i][:3, :4], depth_gts[i]['coord'])
+                # ray_origins, ray_directions = ray_sample
+                # ray_dir_depth = ray_directions * np.tile(depth_gts[i]['depth'][:, None], (1, 3))
+                # ray_pts_depth = ray_origins + ray_dir_depth
+                # trimesh_util.trimesh_show([ray_pts_depth])
+                # from IPython import embed; embed()
+
                 # print(rays_depth.shape)
                 rays_depth = np.transpose(rays_depth, [1,0,2])
                 depth_value = np.repeat(depth_gts[i]['depth'][:,None,None], 3, axis=2) # N x 1 x 3
@@ -843,6 +981,8 @@ def train():
         # rays_depth = torch.Tensor(rays_depth).to(device) if rays_depth is not None else None
         raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=True, num_workers=0))
         raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=True, num_workers=0)) if rays_depth is not None else None
+        # raysRGB_iter = iter(DataLoader(RayDataset(rays_rgb), batch_size = N_rgb, shuffle=True, num_workers=0))
+        # raysDepth_iter = iter(DataLoader(RayDataset(rays_depth), batch_size = N_depth, shuffle=True, num_workers=0)) if rays_depth is not None else None
 
 
     N_iters = args.N_iters + 1
@@ -1062,7 +1202,8 @@ def train():
 
     
         if i%args.i_print==0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()} Depth Loss: {depth_loss.item()}  PSNR: {psnr.item()}")
+            # tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))

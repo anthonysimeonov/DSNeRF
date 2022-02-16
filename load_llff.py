@@ -1,9 +1,12 @@
 import numpy as np
-import os, imageio
+import os, imageio, os.path as osp
 from pathlib import Path
 from colmapUtils.read_write_model import *
 from colmapUtils.read_write_dense import *
 import json
+import copy
+import trimesh
+from scipy.spatial.transform import Rotation as R
 
 
 ########## Slightly modified version of LLFF data loading code 
@@ -311,6 +314,28 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
         
     render_poses = np.array(render_poses).astype(np.float32)
 
+    # visualization for debugging
+    scene = trimesh.Scene()
+    taxes_0 = []
+    taxes_render = []
+    for i in range(poses.shape[0]):
+        axis = trimesh.creation.axis(transform=np.concatenate([poses[i][:3, :4], np.array([[0, 0, 0, 1]])], axis=0), origin_color=[0, 0, 0])
+        # axis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0), origin_color=[0, 0, 0])
+        taxes_0.append(axis)
+    scene.add_geometry(taxes_0)
+
+    taxes = []
+    taxes_render = []
+    for i in range(N_views):
+        axis = trimesh.creation.axis(transform=np.concatenate([render_poses[i][:3, :4], np.array([[0, 0, 0, 1]])], axis=0))
+        taxes.append(axis)
+
+        # raxis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+        # taxes_render.append(axis)
+    scene.add_geometry(taxes)
+    scene.show()
+    from IPython import embed; embed()
+
     c2w = poses_avg(poses)
     print('Data:')
     print(poses.shape, images.shape, bds.shape)
@@ -438,7 +463,192 @@ def load_sensor_depth(basedir, factor=8, bd_factor=.75):
     np.save(data_file, data_list)
     return data_list
 
+
+def filter_realsense_depth(depth_raw, dmin, dmax, scale=0.001, flat=False):
+    depth_raw = depth_raw * scale
+    valid = depth_raw < dmax
+    valid = np.logical_and(valid, depth_raw > dmin)
+    depth_valid = copy.deepcopy(depth_raw)
+    depth_valid = np.zeros_like(depth_raw)
+    depth_valid[valid] = depth_raw[valid]
+    if flat:
+        return depth_raw[valid].reshape(-1)
+    else:
+        return depth_valid
+
+
+def load_realsense_depth(basedir):
+    data_file = Path(basedir) / 'realsense_depth.npy'
+
+    img_names = os.listdir(osp.join(basedir, 'images'))
+    imagefiles = [osp.join(basedir, 'images', f) for f in img_names if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    depthfiles = [osp.join(basedir, 'depth', f) for f in img_names if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+
+    images = [imageio.imread(f) for f in imagefiles]
+    depths = [imageio.imread(f) for f in depthfiles]
+    depth_filtered = [filter_realsense_depth(depth_img, 0.0, 0.75) for depth_img in depths]
+    depth_filtered_flat = [filter_realsense_depth(depth_img, 0.0, 0.75, flat=True) for depth_img in depths]
     
+    # # todo: what does this do? what is "bds"?
+    # _, bds_raw, _ = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+    # bds_raw = np.moveaxis(bds_raw, -1, 0).astype(np.float32)
+    # # print(bds_raw.shape)
+    # # Rescale if bd_factor is provided
+    # sc = 1. if bd_factor is None else 1./(bds_raw.min() * bd_factor)
+    # 
+    # near = np.ndarray.min(bds_raw) * .9 * sc
+    # far = np.ndarray.max(bds_raw) * 1. * sc
+    # print('near/far:', near, far)
+
+    data_list = []
+    for id_im in range(len(images)):
+        # if id_im == 6:
+        #     continue
+        depth_list = []
+        coord_list = []
+        weight_list = []
+
+        # get indices where depth is nonzero
+        depth_img = depth_filtered[id_im]
+        nonzero_depth = np.where(depth_img > 0)
+
+        coords = np.vstack(nonzero_depth).T
+        depths = depth_filtered_flat[id_im]
+        weights = np.ones_like(depths)
+
+        print(id_im, len(depths), np.min(depths), np.max(depths), np.mean(depths))
+        data_list.append({"depth":depths, "coord":coords, "weight":weights})
+        # for i in range(images[0].shape[0]):
+        #     for j in range(images[0].shape[1]):
+        # for i in nonzero_depth[0]:
+        #     for j in nonzero_depth[1]:
+        #         depth = depth_img[i, j]
+
+        #         coord = [j, i]
+
+        #         # TODO: what does this do?
+        #         # if depth < bds_raw[id_im-1,0] * sc or depth > bds_raw[id_im-1,1] * sc:
+        #         #     continue
+        #         weight = 1.0
+        #         depth_list.append(depth)
+        #         coord_list.append(coord)
+        #         weight_list.append(weight)
+        # if len(depth_list) > 0:
+        #     print(id_im, len(depth_list), np.min(depth_list), np.max(depth_list), np.mean(depth_list))
+        #     data_list.append({"depth":np.array(depth_list), "coord":np.array(coord_list), "weight":np.array(weight_list)})
+        # else:
+        #     print(id_im, len(depth_list))
+    # json.dump(data_list, open(data_file, "w"))
+    np.save(data_file, data_list)
+    return data_list
 
     
+def load_realsense_data(path):
+    imgdir = os.path.join(path, 'images')
+    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    
+    def imread(f):
+        if f.endswith('png'):
+            return imageio.imread(f, ignoregamma=True)
+        else:
+            return imageio.imread(f)
 
+    imgs_raw = [imread(f)[...,:3]/255. for f in imgfiles]
+    # imgs = np.stack(imgs, 0)
+    imgs = []
+    for i in range(len(imgs_raw)):
+        # if i == 6:
+        #     continue
+        imgs.append(imgs_raw[i])
+    imgs = np.stack(imgs, 0)
+    num = imgs.shape[0]
+
+    cam_path = os.path.join(path, "camera.npz")
+    cam_info = np.load(cam_path)
+    cam_intrinsics = cam_info['intrinsics']
+    cam_poses = cam_info['poses34']
+    cam_poses_fixed = []
+    for i in range(cam_poses.shape[0]):
+        # we need to convert these poses to have the right orientation
+        # start_rot = R.from_euler('xyz', [0, 0, np.pi/2]).as_matrix()
+        start_rot = R.from_euler('xyz', [0, np.pi, np.pi/2]).as_matrix()
+        start_pose = np.eye(4); start_pose[:-1, :-1] = start_rot
+        fixed_pose = np.matmul(cam_info['poses44'][i], start_pose)
+        fixed_pose_inv = np.linalg.inv(fixed_pose)
+
+        if i == 0:
+            fixed_pose_ref = copy.deepcopy(fixed_pose_inv)
+            # fixed_pose_ref = copy.deepcopy(fixed_pose)
+            fixed_pose_rel = np.eye(4)
+        else:
+            # T_relative_world = np.matmul(T_target_world, np.linalg.inv(T_source_world))
+            # fixed_pose_rel = np.matmul(fixed_pose, np.linalg.inv(fixed_pose_ref))
+            fixed_pose_rel = np.matmul(fixed_pose_inv, np.linalg.inv(fixed_pose_ref))
+
+        # if i == 6:
+        #     continue
+        # cam_poses_fixed.append(fixed_pose_rel[:-1])
+        cam_poses_fixed.append(fixed_pose[:-1])
+        # cam_poses_fixed.append(fixed_pose_inv[:-1])
+
+    poses = np.stack(cam_poses_fixed)
+    poses = recenter_poses(poses)
+    print('poses shape:', poses.shape)
+
+    focal = (cam_intrinsics[0, 0] + cam_intrinsics[1, 1]) / 2.0
+    H, W = imgs[0].shape[:2]
+    print("HWF", H, W, focal)
+
+    if True:
+        c2w = poses_avg(poses)
+        print('recentered', c2w.shape)
+        print(c2w[:3,:4])
+
+        ## Get spiral
+        # Get average pose
+        up = normalize(poses[:, :3, 1].sum(0))  # this is what it usually is
+
+        # Find a reasonable "focus depth" for this dataset
+        close_depth, inf_depth = 0.1, 1.0
+        dt = .75
+        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+        render_focal = mean_dz
+
+        render_focal = render_focal / 0.3
+
+        # Get radii for spiral path
+        shrink_factor = .8
+        zdelta = close_depth * .2
+        tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
+        rads = np.percentile(np.abs(tt), 90, 0)
+        c2w_path = c2w
+        # N_views = 20
+        N_views = 120
+        N_rots = 2
+
+        # Generate poses for spiral path
+        render_poses = render_path_spiral(c2w_path, up, rads, render_focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
+
+    scene = trimesh.Scene()
+    taxes_0 = []
+    taxes_render = []
+    for i in range(poses.shape[0]):
+        axis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0), origin_color=[0, 0, 0])
+        taxes_0.append(axis)
+    scene.add_geometry(taxes_0)
+
+    taxes = []
+    taxes_render = []
+    for i in range(N_views):
+        axis = trimesh.creation.axis(transform=np.concatenate([render_poses[i][:3, :4], np.array([[0, 0, 0, 1]])], axis=0))
+        taxes.append(axis)
+
+        # raxis = trimesh.creation.axis(transform=np.concatenate([poses[i], np.array([[0, 0, 0, 1]])], axis=0))
+        # taxes_render.append(axis)
+    scene.add_geometry(taxes)
+    scene.show()
+
+    from IPython import embed; embed()
+
+
+    return imgs, poses, [H, W, focal], render_poses
